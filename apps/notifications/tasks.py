@@ -1,0 +1,195 @@
+"""
+Outbound notifications. Every send runs in a Celery worker, never in a request.
+
+Email goes through Django's configured backend (Hostinger SMTP in production,
+console in local development).
+"""
+
+import logging
+import smtplib
+import socket
+from html import escape
+
+from celery import shared_task
+from django.conf import settings
+from django.core.mail import EmailMultiAlternatives
+from django.template.loader import render_to_string
+
+from . import telegram
+from .telegram import TelegramTemporaryError
+
+logger = logging.getLogger(__name__)
+
+# Network-level failures worth retrying. Bad addresses or auth errors are not.
+RETRYABLE_ERRORS = (smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError, socket.timeout, ConnectionError)
+
+
+@shared_task(
+    bind=True,
+    autoretry_for=RETRYABLE_ERRORS,
+    retry_backoff=10,
+    retry_backoff_max=300,
+    retry_jitter=True,
+    max_retries=5,
+)
+def send_templated_email(self, *, to: str, subject: str, template: str, context: dict) -> None:
+    """
+    Render `<template>.txt` and `<template>.html` and send them as one email.
+
+    The context must be JSON-serialisable (it travels through Redis).
+    """
+    text_body = render_to_string(f"{template}.txt", context)
+    html_body = render_to_string(f"{template}.html", context)
+    message = EmailMultiAlternatives(
+        subject=subject,
+        body=text_body,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        to=[to],
+    )
+    message.attach_alternative(html_body, "text/html")
+    message.send(fail_silently=False)
+    # Log the template only, never the code or other personal data.
+    logger.info("Sent email template=%s task=%s", template, self.request.id)
+
+
+# ---------------------------------------------------------------------------
+# Telegram staff alerts
+# ---------------------------------------------------------------------------
+@shared_task(
+    autoretry_for=(TelegramTemporaryError,),
+    retry_backoff=15,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    max_retries=5,
+)
+def notify_payment(intent_id: int, event: str) -> None:
+    """
+    Tell the staff Telegram group about an approved payment or one that needs
+    review, with the slip photo attached when there is one.
+    """
+    from apps.payments.models import PaymentIntent, PaymentSlip
+
+    intent = PaymentIntent.objects.select_related("member", "tier").filter(pk=intent_id).first()
+    if intent is None:
+        return
+    slip = intent.slips.exclude(status=PaymentSlip.Status.REJECTED).first()
+
+    heading = {"approved": "Payment approved", "review": "Payment needs review"}.get(event, "Payment update")
+    member = intent.member
+    lines = [
+        f"<b>{escape(heading)}</b>",
+        "",
+        f"Member: {escape(member.full_name)} (@{escape(member.handle)})",
+        f"Seal: {escape(intent.tier.name)}",
+        f"Amount: {intent.amount_satang / 100:,.2f} THB",
+        f"Reference: <code>{escape(intent.reference)}</code>",
+    ]
+    if slip and slip.trans_ref:
+        lines.append(f"Bank ref: <code>{escape(slip.trans_ref)}</code>")
+    if event == "review" and slip and slip.note:
+        lines.append(f"Reason: {escape(slip.note)}")
+    caption = "\n".join(lines)
+
+    if slip and slip.image:
+        with slip.image.open("rb") as fh:
+            telegram.send_photo(fh.read(), caption)
+    else:
+        telegram.send_message(caption)
+
+
+@shared_task(
+    autoretry_for=(TelegramTemporaryError,),
+    retry_backoff=15,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    max_retries=5,
+)
+def notify_redemption(redemption_id: int) -> None:
+    """Tell staff a treasure was unlocked so they can prepare it."""
+    from apps.treasures.models import Redemption
+
+    redemption = Redemption.objects.select_related("member", "treasure").filter(pk=redemption_id).first()
+    if redemption is None:
+        return
+    member = redemption.member
+    text = "\n".join(
+        [
+            "<b>Treasure unlocked</b>",
+            "",
+            f"Member: {escape(member.full_name)} (@{escape(member.handle)})",
+            f"Treasure: {escape(redemption.treasure.name)}",
+            f"Keys spent: {redemption.keys_spent}",
+            f"Claim code: <code>{escape(redemption.claim_code)}</code>",
+        ]
+    )
+    telegram.send_message(text)
+
+
+@shared_task(
+    autoretry_for=(TelegramTemporaryError,),
+    retry_backoff=15,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    max_retries=5,
+)
+def notify_reveal(draw_id: int, event: str) -> None:
+    """Tell staff who was drawn as The Chosen, and what they won."""
+    from apps.reveal.models import ChosenDraw
+
+    draw = ChosenDraw.objects.select_related("epoch", "winner").filter(pk=draw_id).first()
+    if draw is None:
+        return
+    winner = draw.winner
+    lines = [
+        f"<b>{'The Chosen drawn' if event == 'drawn' else 'Wheel spun'}</b>",
+        "",
+        f"Epoch: {escape(draw.epoch.label)}",
+        f"Member: {escape(winner.full_name)} (@{escape(winner.handle)})",
+    ]
+    if event == "drawn":
+        lines.append(f"Eligible members: {draw.eligible_count}")
+    else:
+        spin = getattr(draw, "spin", None)
+        if spin:
+            lines.append(f"Prize: {escape(spin.prize.label)} ({escape(spin.prize.value_text)})")
+            lines.append(f"Claim code: <code>{escape(spin.claim_code)}</code>")
+    telegram.send_message("\n".join(lines))
+
+
+@shared_task(
+    autoretry_for=(TelegramTemporaryError,),
+    retry_backoff=15,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    max_retries=5,
+)
+def notify_booking(booking_id: int, event: str) -> None:
+    """Tell staff about a new VIP Chamber request, or a confirmed one being cancelled."""
+    from apps.bookings.models import Booking
+
+    booking = Booking.objects.select_related("member").filter(pk=booking_id).first()
+    if booking is None:
+        return
+    member = booking.member
+    heading = {"requested": "New VIP Chamber request", "cancelled": "Booking cancelled by member"}.get(
+        event, "Booking update"
+    )
+    lines = [
+        f"<b>{escape(heading)}</b>",
+        "",
+        f"Member: {escape(member.full_name)} (@{escape(member.handle)})",
+        f"Phone: {escape(member.display_phone)}",
+        f"Night: {booking.night:%a %d %b %Y} at {escape(booking.time_slot)}",
+        f"Area: {escape(str(booking.get_area_display()))}",
+        f"Guests: {booking.guests}",
+        f"Reference: <code>{escape(booking.reference)}</code>",
+    ]
+    if booking.note:
+        lines.append(f"Request: {escape(booking.note)}")
+    telegram.send_message("\n".join(lines))
+
+
+@shared_task(ignore_result=True, max_retries=0)
+def notify_error(summary: str) -> None:
+    """Server error alert for the staff chat (sent by TelegramErrorHandler)."""
+    telegram.send_message(f"<b>Server error</b>\n<pre>{escape(summary)}</pre>")

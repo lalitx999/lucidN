@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% load static i18n icons %}
+{% comment %}
+  Signed-in member area: compact header, scrolling content, and the fixed
+  five-tab bar in the same order as the original portal.
+  Views pass `active_tab` (portal, keys, reveal, treasures, identity).
+{% endcomment %}
+
+{% block body %}
+<div class="app-shell">
+  <div class="app-column">
+    <header class="portal-header">
+      <a href="{% url 'core:portal' %}" class="d-flex align-items-center gap-2 text-decoration-none">
+        <img src="{% static 'img/logo-256.png' %}" alt="" class="brand-logo brand-logo-sm" width="32" height="32">
+        <span class="font-display text-white tracking-wide">Lucid</span>
+      </a>
+      <div class="d-flex align-items-center gap-3">
+        <span class="small text-gold font-monospace">@{{ request.user.handle }}</span>
+        <a href="{% url 'whispers:inbox' %}" class="whisper-bell" aria-label="{% if unread_whispers %}{% blocktranslate count n=unread_whispers %}{{ n }} unread whisper{% plural %}{{ n }} unread whispers{% endblocktranslate %}{% else %}{% translate 'Whispers' %}{% endif %}">
+          {% icon "mail" "icon" %}
+          {% if unread_whispers %}<span class="whisper-badge">{{ unread_whispers }}</span>{% endif %}
+        </a>
+      </div>
+    </header>
+
+    <main class="app-content portal-content">
+      {% include "partials/install_banner.html" %}
+      {% include "partials/messages.html" %}
+      {% block content %}{% endblock %}
+    </main>
+
+    <nav class="tabbar" aria-label="{% translate 'Member navigation' %}">
+      <a href="{% url 'core:portal' %}" class="tabbar-item{% if active_tab == 'portal' %} active{% endif %}"{% if active_tab == 'portal' %} aria-current="page"{% endif %}>
+        {% icon "sparkles" %}<span>{% translate "Portal" %}</span>
+      </a>
+      <a href="{% url 'keys:keys' %}" class="tabbar-item{% if active_tab == 'keys' %} active{% endif %}"{% if active_tab == 'keys' %} aria-current="page"{% endif %}>
+        {% icon "coins" %}<span>{% translate "Keys" %}</span>
+      </a>
+      <a href="{% url 'reveal:reveal' %}" class="tabbar-item{% if active_tab == 'reveal' %} active{% endif %}"{% if active_tab == 'reveal' %} aria-current="page"{% endif %}>
+        {% if can_spin %}{% icon "refresh" "pulse text-gold" %}{% else %}{% icon "refresh" %}{% endif %}<span>{% translate "Reveal" %}</span>
+      </a>
+      <a href="{% url 'treasures:catalog' %}" class="tabbar-item{% if active_tab == 'treasures' %} active{% endif %}"{% if active_tab == 'treasures' %} aria-current="page"{% endif %}>
+        {% icon "gift" %}<span>{% translate "Treasures" %}</span>
+      </a>
+      <a href="{% url 'accounts:identity' %}" class="tabbar-item{% if active_tab == 'identity' %} active{% endif %}"{% if active_tab == 'identity' %} aria-current="page"{% endif %}>
+        {% icon "user" %}<span>{% translate "Identity" %}</span>
+      </a>
+    </nav>
+  </div>
+</div>
+{% endblock %}
