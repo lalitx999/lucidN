@@ -23,7 +23,7 @@ Stack (`docker-compose.prod.yml`): `nginx` (TLS, static files), `web` (Gunicorn)
 
 ```bash
 ssh root@<server-ip>
-git clone https://github.com/lalitx999/lucidbar.git /opt/lucid
+git clone https://github.com/lalitx999/lucidN.git /opt/lucid
 sudo bash /opt/lucid/deploy/vps-setup.sh deploy
 ```
 
